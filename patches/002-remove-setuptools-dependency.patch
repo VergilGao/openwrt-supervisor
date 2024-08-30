@@ -1,0 +1,323 @@
+--- a/setup.py
++++ b/setup.py
+@@ -23,7 +23,7 @@
+     raise RuntimeError('On Python 3, Supervisor requires Python 3.4 or later')
+ 
+ # pkg_resource is used in several places
+-requires = ["setuptools"]
++requires = [ "setuptools; python_version < '3.8'" ]
+ tests_require = []
+ if py_version < (3, 3):
+     tests_require.append('mock<4.0.0.dev0')
+--- a/supervisor/compat.py
++++ b/supervisor/compat.py
+@@ -149,3 +149,52 @@
+     from html.parser import HTMLParser
+ except ImportError: # pragma: no cover
+     from HTMLParser import HTMLParser
++
++# Begin importlib/setuptools compatibility code
++
++# Supervisor used pkg_resources (a part of setuptools) to load package
++# resources for 15 years, until setuptools 67.5.0 (2023-03-05) deprecated
++# the use of pkg_resources.  On Python 3.8 or later, Supervisor now uses
++# importlib (part of Python 3 stdlib).  Unfortunately, on Python < 3.8,
++# Supervisor needs to use pkg_resources despite its deprecation.  The PyPI
++# backport packages "importlib-resources" and "importlib-metadata" couldn't
++# be added as dependencies to Supervisor because they require even more
++# dependencies that would likely cause some Supervisor installs to fail.
++from warnings import filterwarnings as _fw
++_fw("ignore", message="pkg_resources is deprecated as an API")
++
++try: # pragma: no cover
++    from importlib.metadata import EntryPoint as _EntryPoint
++
++    def import_spec(spec):
++        return _EntryPoint(None, spec, None).load()
++
++except ImportError: # pragma: no cover
++    from pkg_resources import EntryPoint as _EntryPoint
++
++    def import_spec(spec):
++        ep = _EntryPoint.parse("x=" + spec)
++        if hasattr(ep, 'resolve'):
++            # this is available on setuptools >= 10.2
++            return ep.resolve()
++        else:
++            # this causes a DeprecationWarning on setuptools >= 11.3
++            return ep.load(False)
++
++try: # pragma: no cover
++    import importlib.resources as _importlib_resources
++
++    if hasattr(_importlib_resources, "files"):
++        def resource_filename(package, path):
++            return str(_importlib_resources.files(package).joinpath(path))
++
++    else:
++        # fall back to deprecated .path if .files is not available
++        def resource_filename(package, path):
++            with _importlib_resources.path(package, '__init__.py') as p:
++                return str(p.parent.joinpath(path))
++
++except ImportError: # pragma: no cover
++    from pkg_resources import resource_filename
++
++# End importlib/setuptools compatibility code
+--- a/supervisor/confecho.py
++++ b/supervisor/confecho.py
+@@ -1,7 +1,7 @@
+-import pkg_resources
+ import sys
+ from supervisor.compat import as_string
++from supervisor.compat import resource_filename
+
+ def main(out=sys.stdout):
+-    config = pkg_resources.resource_string(__name__, 'skel/sample.conf')
+-    out.write(as_string(config))
++    with open(resource_filename(__package__, 'skel/sample.conf'), 'r') as f:
++        out.write(as_string(f.read()))
+--- a/supervisor/options.py
++++ b/supervisor/options.py
+@@ -10,7 +10,6 @@
+ import grp
+ import resource
+ import stat
+-import pkg_resources
+ import glob
+ import platform
+ import warnings
+@@ -22,6 +21,7 @@
+ from supervisor.compat import xmlrpclib
+ from supervisor.compat import StringIO
+ from supervisor.compat import basestring
++from supervisor.compat import import_spec
+ 
+ from supervisor.medusa import asyncore_25 as asyncore
+ 
+@@ -387,14 +387,8 @@
+         return factories
+ 
+     def import_spec(self, spec):
+-        ep = pkg_resources.EntryPoint.parse("x=" + spec)
+-        if hasattr(ep, 'resolve'):
+-            # this is available on setuptools >= 10.2
+-            return ep.resolve()
+-        else:
+-            # this causes a DeprecationWarning on setuptools >= 11.3
+-            return ep.load(False)
+-
++        """On failure, raises either AttributeError or ImportError"""
++        return import_spec(spec)
+ 
+ class ServerOptions(Options):
+     user = None
+--- a/supervisor/tests/test_end_to_end.py
++++ b/supervisor/tests/test_end_to_end.py
+@@ -5,7 +5,7 @@
+ import signal
+ import sys
+ import unittest
+-import pkg_resources
++from supervisor.compat import resource_filename
+ from supervisor.compat import xmlrpclib
+ from supervisor.xmlrpc import SupervisorTransport
+ 
+@@ -26,7 +26,7 @@
+         passed to the child without the percent sign being mangled."""
+         key = "SUPERVISOR_TEST_1441B"
+         val = "foo_%s_%_%%_%%%_%2_bar"
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-291a.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-291a.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         try:
+             os.environ[key] = val
+@@ -39,7 +39,7 @@
+     def test_issue_550(self):
+         """When an environment variable is set in the [supervisord] section,
+         it should be put into the environment of the subprocess."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-550.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-550.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -55,7 +55,7 @@
+     def test_issue_565(self):
+         """When a log file has Unicode characters in it, 'supervisorctl
+         tail -f name' should still work."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-565.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-565.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -72,7 +72,7 @@
+     def test_issue_638(self):
+         """When a process outputs something on its stdout or stderr file
+         descriptor that is not valid UTF-8, supervisord should not crash."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-638.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-638.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -91,7 +91,7 @@
+     def test_issue_663(self):
+         """When Supervisor is run on Python 3, the eventlistener protocol
+         should work."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-663.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-663.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -103,7 +103,7 @@
+         """When a subprocess name has Unicode characters, 'supervisord'
+         should not send incomplete XML-RPC responses and 'supervisorctl
+         status' should work."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-664.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-664.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -122,7 +122,7 @@
+     def test_issue_733(self):
+         """When a subprocess enters the FATAL state, a one-line eventlistener
+         can be used to signal supervisord to shut down."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-733.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-733.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -131,7 +131,7 @@
+         supervisord.expect(pexpect.EOF)
+ 
+     def test_issue_835(self):
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-835.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-835.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -147,7 +147,7 @@
+             transport.connection.close()
+ 
+     def test_issue_836(self):
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-836.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-836.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -170,7 +170,7 @@
+     def test_issue_986_command_string_with_double_percent(self):
+         """A percent sign can be used in a command= string without being
+         expanded if it is escaped by a second percent sign."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-986.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-986.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -179,7 +179,7 @@
+     def test_issue_1054(self):
+         """When run on Python 3, the 'supervisorctl avail' command
+         should work."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1054.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1054.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -197,7 +197,7 @@
+         """When the [supervisord] section has a variable defined in
+         environment=, that variable should be able to be used in an
+         %(ENV_x) expansion in a [program] section."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1170a.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1170a.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -208,7 +208,7 @@
+         environment=, and a variable by the same name is defined in
+         enviroment= of a [program] section, the one in the [program]
+         section should be used."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1170b.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1170b.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -219,7 +219,7 @@
+         environment=, and a variable by the same name is defined in
+         enviroment= of an [eventlistener] section, the one in the
+         [eventlistener] section should be used."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1170c.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1170c.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -230,7 +230,7 @@
+         then the non-rotating logger will be used to avoid an
+         IllegalSeekError in the case that the user has configured a
+         non-seekable file like /dev/stdout."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1224.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1224.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -239,7 +239,7 @@
+     def test_issue_1231a(self):
+         """When 'supervisorctl tail -f name' is run and the log contains
+         unicode, it should not fail."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1231a.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1231a.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -256,7 +256,7 @@
+     def test_issue_1231b(self):
+         """When 'supervisorctl tail -f name' is run and the log contains
+         unicode, it should not fail."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1231b.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1231b.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -290,7 +290,7 @@
+     def test_issue_1231c(self):
+         """When 'supervisorctl tail -f name' is run and the log contains
+         unicode, it should not fail."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1231c.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1231c.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -332,7 +332,7 @@
+         """When the output of 'supervisorctl tail -f worker' is piped such as
+         'supervisor tail -f worker | grep something', 'supervisorctl' should
+         not crash."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1298.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1298.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -366,7 +366,7 @@
+     def test_issue_1483a_identifier_default(self):
+         """When no identifier is supplied on the command line or in the config
+         file, the default is used."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1483a.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1483a.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -385,7 +385,7 @@
+     def test_issue_1483b_identifier_from_config_file(self):
+         """When the identifier is supplied in the config file only, that
+         identifier is used instead of the default."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1483b.conf')
++        filename = resource_filename(__package__, 'fixtures/issue-1483b.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename]
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
+@@ -404,7 +404,7 @@
+     def test_issue_1483c_identifier_from_command_line(self):
+         """When an identifier is supplied in both the config file and on the
+         command line, the one from the command line is used."""
+-        filename = pkg_resources.resource_filename(__name__, 'fixtures/issue-1483c.conf')
++        filename = resource_filename(__pacakge__, 'fixtures/issue-1483c.conf')
+         args = ['-m', 'supervisor.supervisord', '-c', filename, '-i', 'from_command_line']
+         supervisord = pexpect.spawn(sys.executable, args, encoding='utf-8')
+         self.addCleanup(supervisord.kill, signal.SIGINT)
