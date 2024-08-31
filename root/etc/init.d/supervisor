@@ -1,0 +1,74 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=15
+USE_PROCD=1
+NAME=supervisor
+PROG=/usr/bin/supervisord
+CONF=/var/supervisor.conf
+CONFD=/etc/supervisor.d
+PIDFILE=/var/run/supervisor.pid
+SOCKFILE=/var/run/supervisor.sock
+
+get_config() {
+    local name=$1
+    local section=$2
+    local option=$3
+    local default=$4
+
+    echo $(uci get $name.$section.$option 2>/dev/null || echo $default)
+}
+
+start_service() {
+    local address=$(get_config $NAME http address "127.0.0.1:9001")
+    local username=$(get_config $NAME http username "admin")
+    local password=$(get_config $NAME http password "admin")
+
+    cat <<EOF > $CONF
+[unix_http_server]
+file=$SOCKFILE
+chmod=0700
+chown=nobody:nogroup
+
+[inet_http_server]
+port=$address
+username=$username
+password=$password
+
+[supervisord]
+logfile=/var/log/supervisord.log
+logfile_maxbytes=50MB
+logfile_backups=10
+loglevel=info
+pidfile=$PIDFILE
+nodaemon=true
+minfds=1024
+minprocs=200
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[supervisorctl]
+serverurl=unix://$SOCKFILE
+
+[include]
+files = $CONFD/*.conf
+EOF
+    mkdir -p $CONFD
+    procd_open_instance $NAME_instance
+    procd_set_param command $PROG -c $CONF
+    procd_set_param respawn
+    procd_close_instance
+}
+
+stop() {
+    if [ -f $PIDFILE ]; then
+        kill $(cat $PIDFILE)
+    fi
+}
+
+restart(){
+    stop
+    sleep 1
+    start_service
+}

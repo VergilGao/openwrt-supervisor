@@ -1,0 +1,21 @@
+#!/bin/sh
+
+NAME=supervisor
+
+init_config() {
+    local name=$1
+    local section=$2
+    local option=$3
+    local default=$4
+
+    uci get $name.$section.$option 2>/dev/null || uci set $name.$section.$option=$default
+}
+
+touch /etc/config/$NAME
+uci set $NAME.http=$NAME
+init_config $NAME http address "127.0.0.1:9001"
+init_config $NAME http username "admin"
+init_config $NAME http password "admin"
+
+uci commit $NAME
+exit 0
